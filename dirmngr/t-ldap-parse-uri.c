@@ -24,6 +24,60 @@
 #include "t-support.h"
 
 static void
+test_ldap_uri_p (void)
+{
+  struct test
+  {
+    const char *uri;
+    int result;
+  };
+
+  struct test tests[] = {
+    { "ldap://foo", 1 },
+    { "ldap://", 1 },
+    { "ldap:", 1 },
+    { "ldap", 0 },
+    { "ldapfoobar", 0 },
+
+    { "ldaps://foo", 1 },
+    { "ldaps://", 1 },
+    { "ldaps:", 1 },
+    { "ldaps", 0 },
+    { "ldapsfoobar", 0 },
+
+    { "ldapi://foo", 1 },
+    { "ldapi://", 1 },
+    { "ldapi:", 1 },
+    { "ldapi", 0 },
+    { "ldapifoobar", 0 },
+
+    { "LDAP://FOO", 1 },
+    { "LDAP://", 1 },
+    { "LDAP:", 1 },
+    { "LDAP", 0 },
+    { "LDAPFOOBAR", 0 }
+  };
+
+  int test_count;
+
+  void check (struct test *test)
+  {
+    int result = ldap_uri_p (test->uri);
+    if (result != test->result)
+      {
+	printf ("'%s' is %san LDAP schema, but ldap_uri_p says opposite.\n",
+		test->uri, test->result ? "" : "not ");
+	fail(1000 * test_count);
+      }
+  }
+
+  for (test_count = 1;
+       test_count <= sizeof (tests) / sizeof (tests[0]);
+       test_count ++)
+    check (&tests[test_count - 1]);
+}
+
+static void
 test_ldap_parse_uri (void)
 {
   struct test
@@ -156,6 +210,7 @@ main (int argc, char **argv)
   (void)argc;
   (void)argv;
 
+  test_ldap_uri_p ();
   test_ldap_parse_uri ();
 
   return 0;

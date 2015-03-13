@@ -23,6 +23,8 @@
 #include "util.h"
 #include "http.h"
 
+extern int ldap_uri_p (const char *url);
+
 extern gpg_error_t ldap_parse_uri (parsed_uri_t *ret_uri, const char *uri);
 
 #endif
