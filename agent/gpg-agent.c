@@ -47,6 +47,9 @@
 #include <unistd.h>
 #include <signal.h>
 #include <pth.h>
+#ifdef HAVE_LAUNCHD
+#include <launch.h>
+#endif/*HAVE_LAUNCHD*/
 
 #define JNLIB_NEED_LOG_LOGV
 #define JNLIB_NEED_AFLOCAL
@@ -67,6 +70,9 @@ enum cmd_and_opt_values
   oQuiet	  = 'q',
   oSh		  = 's',
   oVerbose	  = 'v',
+#ifdef HAVE_LAUNCHD
+  oLaunchd    = 'l',
+#endif /*HAVE_LAUNCHD*/
 
   oNoVerbose = 500,
   aGPGConfList,
@@ -200,6 +206,9 @@ static ARGPARSE_OPTS opts[] = {
   },
   { oWriteEnvFile, "write-env-file", 2|8,
             N_("|FILE|write environment settings also to FILE")},
+#ifdef HAVE_LAUNCHD
+  { oLaunchd, "launchd", 0, N_("run from Apple's launchd") },
+#endif/*HAVE_LAUNCHD*/
   {0}
 };
 
@@ -604,6 +613,9 @@ main (int argc, char **argv )
   gpg_error_t err;
   const char *env_file_name = NULL;
   struct assuan_malloc_hooks malloc_hooks;
+#ifdef HAVE_LAUNCHD
+  int launchd = 0;
+#endif
 
   /* Before we do anything else we save the list of currently open
      file descriptors and the signal mask.  This info is required to
@@ -855,6 +867,10 @@ main (int argc, char **argv )
             env_file_name = make_filename ("~/.gpg-agent-info", NULL);
           break;
 
+#ifdef HAVE_LAUNCHD
+        case oLaunchd: launchd = 1; break;
+#endif/*HAVE_LAUNCHD*/
+
         default : pargs.err = configfp? 1:2; break;
 	}
     }
@@ -983,7 +999,11 @@ main (int argc, char **argv )
   /* If this has been called without any options, we merely check
      whether an agent is already running.  We do this here so that we
      don't clobber a logfile but print it directly to stderr. */
-  if (!pipe_server && !is_daemon)
+  if (!pipe_server && !is_daemon
+#ifdef HAVE_LAUNCHD
+      && !launchd
+#endif/*HAVE_LAUNCHD*/
+     )
     {
       log_set_prefix (NULL, JNLIB_LOG_WITH_PREFIX);
       check_for_running_agent (0, 0);
@@ -1046,7 +1066,95 @@ main (int argc, char **argv )
       xfree (ctrl);
     }
   else if (!is_daemon)
+#ifdef HAVE_LAUNCHD
+    {
+      if (!launchd)
+      {
+        log_error("unreachable code somehow reached\n");
+        agent_exit(1);
+      }
+
+      launch_data_t msg, resp, tmp, tmpval;
+      gnupg_fd_t fd = GNUPG_INVALID_FD;
+      gnupg_fd_t fd_ssh = GNUPG_INVALID_FD;
+      char *infostr;
+      pid_t pid;
+
+      if (GNUPG_INVALID_FD == fd)
+      {
+        socket_name = create_socket_name
+                ("S.gpg-agent", "/tmp/gpg-XXXXXX/S.gpg-agent");
+        fd = create_server_socket(socket_name, 0, &socket_nonce);
+      }
+      if (opt.ssh_support && GNUPG_INVALID_FD == fd_ssh)
+      {
+        socket_name_ssh = create_socket_name
+                ("S.gpg-agent.ssh", "/tmp/gpg-XXXXXX/S.gpg-agent.ssh");
+        fd_ssh = create_server_socket(socket_name_ssh, 1, &socket_nonce_ssh);
+      }
+
+      msg = launch_data_alloc(LAUNCH_DATA_DICTIONARY);
+      tmp = launch_data_alloc(LAUNCH_DATA_DICTIONARY);
+
+      pid = getpid();
+
+      if (asprintf (&infostr, "%s:%lu:1",
+              socket_name, (ulong)pid ) < 0)
+      {
+        log_error ("out of core\n");
+        agent_exit(1);
+      }
+
+      tmpval = launch_data_new_string(infostr);
+      launch_data_dict_insert(tmp, tmpval, "GPG_AGENT_INFO");
+      if (opt.ssh_support)
+      {
+        char *infostr_ssh_pid;
+        launch_data_t infodata_ssh_sock, infodata_ssh_pid;
+        infodata_ssh_sock = launch_data_new_string(socket_name_ssh);
+        launch_data_dict_insert(tmp, infodata_ssh_sock, "SSH_AUTH_SOCK");
+        if (asprintf(&infostr_ssh_pid, "%lu", (ulong)pid) < 0)
+        {
+          log_error ("out of core\n");
+          agent_exit(1);
+        }
+        infodata_ssh_pid = launch_data_new_string(infostr_ssh_pid);
+        launch_data_dict_insert(tmp, infodata_ssh_pid, "SSH_AGENT_PID");
+      }
+
+      launch_data_dict_insert(msg, tmp, "SetUserEnvironment");
+
+      resp = launch_msg(msg);
+      launch_data_free(msg);
+      if (NULL == resp)
+      {
+        log_error("failed to set launchd environemt");
+        agent_exit(1);
+      }
+      launch_data_free(resp);
+
+      if (chdir("/"))
+      {
+        log_error ("chdir to / failed: %s\n", strerror (errno));
+        exit (1);
+      }
+
+      {
+        struct sigaction sa;
+
+        sa.sa_handler = SIG_IGN;
+        sigemptyset (&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction (SIGPIPE, &sa, NULL);
+      }
+
+      log_info ("%s %s started\n", strusage(11), strusage(13) );
+      handle_connections (fd, fd_ssh);
+      assuan_sock_close (fd);
+    }
+#else/*HAVE_LAUNCHD*/
     ; /* NOTREACHED */
+#endif/*HAVE_LAUNCHD*/
   else
     { /* Regular server mode */
       gnupg_fd_t fd;
@@ -1221,18 +1329,53 @@ main (int argc, char **argv )
             }
           else
             {
+#ifdef HAVE_LAUNCHD
+              if (launchd)
+              {
+                launch_data_t resp, env, infostr_val, msg;
+                msg = launch_data_alloc(LAUNCH_DATA_DICTIONARY);
+                env = launch_data_alloc(LAUNCH_DATA_DICTIONARY);
+                char * infostr_var = strsep(&infostr, '=');
+
+                infostr_val = launch_data_new_string(infostr_var);
+                launch_data_dict_insert(env, infostr_val, infostr);
+                if (opt.ssh_support)
+                {
+                  launch_data_t infostr_ssh_sock_val, infostr_ssh_pid_val;
+                  char * infostr_ssh_sock_var = strsep(&infostr_ssh_sock, '=');
+                  char * infostr_ssh_pid_var = strsep(&infostr_ssh_pid, '=');
+
+                  infostr_ssh_sock_val = launch_data_new_string(infostr_ssh_sock);
+                  launch_data_dict_insert(env, infostr_ssh_sock_val, infostr_ssh_sock_var);
+                  infostr_ssh_pid_val = launch_data_new_string(infostr_ssh_pid);
+                  launch_data_dict_insert(env, infostr_ssh_pid_val, infostr_ssh_pid_var);
+                }
+                launch_data_dict_insert(msg, env, "SetUserEnvironment");
+
+                resp = launch_msg(msg);
+                launch_data_free(msg);
+
+                if (NULL == resp)
+                {
+                  log_error("failed to set launchd environemt");
+                  exit(1);
+                }
+
+              }
+              else
+#endif
               /* Print the environment string, so that the caller can use
                  shell's eval to set it */
               if (csh_style)
                 {
                   *strchr (infostr, '=') = ' ';
-                  printf ("setenv %s;\n", infostr);
+                  printf ("setenv %s\n", infostr);
 		  if (opt.ssh_support)
 		    {
 		      *strchr (infostr_ssh_sock, '=') = ' ';
-		      printf ("setenv %s;\n", infostr_ssh_sock);
+		      printf ("setenv %s\n", infostr_ssh_sock);
 		      *strchr (infostr_ssh_pid, '=') = ' ';
-		      printf ("setenv %s;\n", infostr_ssh_pid);
+		      printf ("setenv %s\n", infostr_ssh_pid);
 		    }
                 }
               else

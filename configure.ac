@@ -755,6 +755,22 @@ else
 ***]])
 fi
 
+#
+# check for Apple's launchd
+#
+AC_ARG_WITH(launchd,
+            AC_HELP_STRING([--with-launchd],
+                           [Build with support for Apple's launchd [default=no]]),
+                           [test "$withval" = no || LAUNCHD=auto],
+                           [LAUNCHD=no])
+if test "x$LAUNCHD" = xauto; then
+      unset LAUNCHD
+      AC_CHECK_PROG(LAUNCHD, [launchd], [yes], [no])
+fi
+if test "x$LAUNCHD" = xyes ; then
+      AC_DEFINE(HAVE_LAUNCHD, 1, [launchd support available])
+fi
+
 
 AC_MSG_NOTICE([checking for networking options])
 
